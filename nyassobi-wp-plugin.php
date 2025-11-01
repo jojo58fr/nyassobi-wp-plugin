@@ -4,7 +4,7 @@
  * Plugin URI: https://nyassobi.com
  * Description: Adds Nyassobi configuration options for headless usage and exposes them via WPGraphQL.
  * Version: 1.0.0
- * Author: Nyassobi
+ * Author: Startingames Origins (for Nyassobi)
  * License: GPL-2.0-or-later
  *
  * @package NyassobiWPPlugin
