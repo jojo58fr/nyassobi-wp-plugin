@@ -41,6 +41,7 @@ final class Nyassobi_WP_Plugin
         add_action('admin_init', [$this, 'register_settings']);
         add_action('admin_menu', [$this, 'register_settings_page']);
         add_action('graphql_register_types', [$this, 'register_graphql_types']);
+        add_action('graphql_register_types', [$this, 'register_contact_mutation']);
     }
 
     /**
@@ -237,6 +238,176 @@ final class Nyassobi_WP_Plugin
                 },
             ]
         );
+    }
+
+    /**
+     * Registers the WPGraphQL mutation used by the React front-end contact form.
+     */
+    public function register_contact_mutation(): void
+    {
+        if (! function_exists('register_graphql_mutation')) {
+            return;
+        }
+
+        register_graphql_mutation(
+            'sendNyassobiContactMessage',
+            [
+                'inputFields' => [
+                    'fullname' => [
+                        'type' => ['non_null' => 'String'],
+                        'description' => __('Full name of the requester.', 'nyassobi-wp-plugin'),
+                    ],
+                    'email' => [
+                        'type' => ['non_null' => 'String'],
+                        'description' => __('Email address of the requester.', 'nyassobi-wp-plugin'),
+                    ],
+                    'subject' => [
+                        'type' => ['non_null' => 'String'],
+                        'description' => __('Subject of the contact request.', 'nyassobi-wp-plugin'),
+                    ],
+                    'message' => [
+                        'type' => ['non_null' => 'String'],
+                        'description' => __('Message body provided by the requester.', 'nyassobi-wp-plugin'),
+                    ],
+                    'token' => [
+                        'type' => 'String',
+                        'description' => __('Optional anti-spam token.', 'nyassobi-wp-plugin'),
+                    ],
+                ],
+                'outputFields' => [
+                    'success' => [
+                        'type' => ['non_null' => 'Boolean'],
+                        'description' => __('Flag indicating whether wp_mail succeeded.', 'nyassobi-wp-plugin'),
+                        'resolve' => static function ($payload, array $args = [], $context = null, $info = null): bool {
+                            $payload = is_array($payload) ? $payload : [];
+                            return (bool) ($payload['success'] ?? false);
+                        },
+                    ],
+                    'message' => [
+                        'type' => ['non_null' => 'String'],
+                        'description' => __('Human readable status returned by the mutation.', 'nyassobi-wp-plugin'),
+                        'resolve' => static function ($payload, array $args = [], $context = null, $info = null): string {
+                            $payload = is_array($payload) ? $payload : [];
+                            return (string) ($payload['message'] ?? '');
+                        },
+                    ],
+                ],
+                'mutateAndGetPayload' => function (array $input, $context = null, $info = null): array {
+                    return $this->handle_contact_mutation($input);
+                },
+            ]
+        );
+    }
+
+    /**
+     * Validates and sends the contact email.
+     *
+     * @param array<string,mixed> $input Raw mutation arguments.
+     *
+     * @return array{success:bool,message:string}
+     */
+    private function handle_contact_mutation(array $input): array
+    {
+        $user_error_class = '\GraphQL\Error\UserError';
+
+        if (! class_exists($user_error_class)) {
+            return [
+                'success' => false,
+                'message' => __('GraphQL error handler is not available.', 'nyassobi-wp-plugin'),
+            ];
+        }
+
+        // Sanitize user supplied values.
+        $fullname = sanitize_text_field((string) ($input['fullname'] ?? ''));
+        $email = sanitize_email((string) ($input['email'] ?? ''));
+        $subject = sanitize_text_field((string) ($input['subject'] ?? ''));
+        $message = sanitize_textarea_field((string) ($input['message'] ?? ''));
+        $token = isset($input['token']) ? sanitize_text_field((string) $input['token']) : '';
+
+        $sanitized = [
+            'fullname' => $fullname,
+            'email' => $email,
+            'subject' => $subject,
+            'message' => $message,
+            'token' => $token,
+        ];
+
+        if ('' === $fullname) {
+            throw new $user_error_class(__('The fullname field is required.', 'nyassobi-wp-plugin'));
+        }
+
+        if ('' === $subject) {
+            throw new $user_error_class(__('The subject field is required.', 'nyassobi-wp-plugin'));
+        }
+
+        if ('' === $message) {
+            throw new $user_error_class(__('The message field is required.', 'nyassobi-wp-plugin'));
+        }
+
+        if (! is_email($email)) {
+            throw new $user_error_class(__('Please supply a valid email address.', 'nyassobi-wp-plugin'));
+        }
+
+        // TODO: plug in reCAPTCHA or nonce validation via the filter below.
+        $token_valid = apply_filters('nyassobi_wp_plugin_validate_contact_token', true, $token, $sanitized, $input);
+        if (! $token_valid) {
+            throw new $user_error_class(__('Security validation failed.', 'nyassobi-wp-plugin'));
+        }
+
+        $settings = self::get_settings();
+        $recipient = isset($settings['contact_email']) ? sanitize_email((string) $settings['contact_email']) : '';
+
+        if (! is_email($recipient)) {
+            $recipient = sanitize_email((string) get_option('admin_email'));
+        }
+
+        if (! is_email($recipient)) {
+            throw new $user_error_class(__('No valid recipient email is configured.', 'nyassobi-wp-plugin'));
+        }
+
+        $mail_subject = sprintf('[Nyassobi] %s', $subject);
+        $body_lines = [
+            'New Nyassobi contact request received:',
+            '',
+            'Full name: ' . $fullname,
+            'Email: ' . $email,
+            '',
+            'Subject: ' . $subject,
+            '',
+            'Message:',
+            $message,
+        ];
+        $body = implode("\n", $body_lines);
+
+        // Compose headers with Reply-To so the team can answer quickly.
+        $headers = ['Content-Type: text/plain; charset=UTF-8'];
+        if ($email) {
+            $reply_to_name = $fullname !== '' ? $fullname : $email;
+            $headers[] = sprintf('Reply-To: %s <%s>', $reply_to_name, $email);
+        }
+
+        $headers = apply_filters('nyassobi_wp_plugin_contact_headers', $headers, $sanitized, $input);
+        $body = apply_filters('nyassobi_wp_plugin_contact_body', $body, $sanitized, $input);
+        $mail_subject = apply_filters('nyassobi_wp_plugin_contact_subject', $mail_subject, $sanitized, $input);
+        $recipient = apply_filters('nyassobi_wp_plugin_contact_recipient', $recipient, $sanitized, $input);
+
+        if (! is_email($recipient)) {
+            throw new $user_error_class(__('No valid recipient email is configured.', 'nyassobi-wp-plugin'));
+        }
+
+        $sent = wp_mail($recipient, $mail_subject, $body, $headers);
+
+        if (! $sent) {
+            return [
+                'success' => false,
+                'message' => __('The message could not be sent. Please try again later.', 'nyassobi-wp-plugin'),
+            ];
+        }
+
+        return [
+            'success' => true,
+            'message' => __('Thank you! Your message has been sent.', 'nyassobi-wp-plugin'),
+        ];
     }
 
     /**

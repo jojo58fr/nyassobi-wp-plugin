@@ -40,3 +40,31 @@ query GetNyassobiSettings {
 ```
 
 Toutes les cles retournees peuvent etre `null` si aucune valeur n'a encore ete renseignee.
+
+### Mutation de contact
+
+Mutation d'envoi de message :
+
+```graphql
+mutation SendNyassobiContact($input: SendNyassobiContactMessageInput!) {
+  sendNyassobiContactMessage(input: $input) {
+    success
+    message
+  }
+}
+```
+
+Variables :
+
+```json
+{
+  "input": {
+    "fullname": "Nom Prenom",
+    "email": "vous@example.com",
+    "subject": "Objet",
+    "message": "Contenu du message"
+  }
+}
+```
+
+Envoyer un champ `token` optionnel dans `input` si vous branchez un anti-spam (reCAPTCHA, nonce, etc.). Utiliser le filtre `nyassobi_wp_plugin_validate_contact_token` pour verifier ce jeton avant l'envoi. Des filtres supplementaires (`nyassobi_wp_plugin_contact_*`) permettent aussi d'ajuster destinataire, sujet, corps ou en-tetes du courriel.
