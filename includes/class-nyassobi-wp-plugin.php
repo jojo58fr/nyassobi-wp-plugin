@@ -17,6 +17,10 @@ final class Nyassobi_WP_Plugin
     private const OPTION_GROUP = 'nyassobi_wp_plugin_group';
     private const PAGE_SLUG = 'nyassobi-wp-plugin';
     private const CAPABILITY = 'manage_options';
+    private const ATELIER_POST_TYPE = 'nyassobi_atelier';
+    private const ATELIER_TAXONOMY = 'atelier_type';
+    private const ATELIER_ATTACHMENT_META = 'nyassobi_atelier_attachment';
+    private const ATELIER_VIDEO_META = 'nyassobi_atelier_video';
 
     /** @var self|null */
     private static $instance = null;
@@ -40,8 +44,13 @@ final class Nyassobi_WP_Plugin
     {
         add_action('admin_init', [$this, 'register_settings']);
         add_action('admin_menu', [$this, 'register_settings_page']);
+        add_action('init', [$this, 'register_ateliers']);
+        add_action('add_meta_boxes', [$this, 'register_atelier_metaboxes']);
+        add_action('save_post', [$this, 'save_atelier_meta']);
+        add_action('admin_enqueue_scripts', [$this, 'enqueue_admin_assets']);
         add_action('graphql_register_types', [$this, 'register_graphql_types']);
         add_action('graphql_register_types', [$this, 'register_contact_mutation']);
+        add_filter('the_content', [$this, 'maybe_gate_atelier_content']);
     }
 
     /**
@@ -102,6 +111,151 @@ final class Nyassobi_WP_Plugin
     }
 
     /**
+     * Ensures default taxonomy terms exist for atelier types.
+     */
+    private function ensure_default_atelier_terms(): void
+    {
+        if (! taxonomy_exists(self::ATELIER_TAXONOMY)) {
+            return;
+        }
+
+        $defaults = [
+            'gratuit' => __('Gratuit', 'nyassobi-wp-plugin'),
+            'payant' => __('Payant', 'nyassobi-wp-plugin'),
+        ];
+
+        foreach ($defaults as $slug => $label) {
+            if (! term_exists($slug, self::ATELIER_TAXONOMY)) {
+                wp_insert_term($label, self::ATELIER_TAXONOMY, ['slug' => $slug]);
+            }
+        }
+    }
+
+    /**
+     * Enqueues admin assets for atelier editing.
+     */
+    public function enqueue_admin_assets(): void
+    {
+        $screen = function_exists('get_current_screen') ? get_current_screen() : null;
+        if (! $screen || self::ATELIER_POST_TYPE !== $screen->post_type) {
+            return;
+        }
+
+        wp_enqueue_media();
+
+        $script = <<<'JS'
+(function ($) {
+    $(document).on('click', '.nyassobi-media-button', function (event) {
+        event.preventDefault();
+
+        const targetSelector = $(this).data('target');
+        const $field = $(targetSelector);
+        if (!$field.length) {
+            return;
+        }
+
+        const frame = wp.media({
+            title: $(this).data('title') || '',
+            button: { text: $(this).data('button') || '' },
+            multiple: false
+        });
+
+        frame.on('select', function () {
+            const attachment = frame.state().get('selection').first().toJSON();
+            if (attachment && attachment.url) {
+                $field.val(attachment.url);
+            }
+        });
+
+        frame.open();
+    });
+})(jQuery);
+JS;
+
+        wp_add_inline_script('jquery', $script);
+    }
+
+    /**
+     * Registers the Ateliers content type and taxonomy.
+     */
+    public function register_ateliers(): void
+    {
+        register_post_type(
+            self::ATELIER_POST_TYPE,
+            [
+                'label' => __('Ateliers', 'nyassobi-wp-plugin'),
+                'labels' => [
+                    'name' => __('Ateliers', 'nyassobi-wp-plugin'),
+                    'singular_name' => __('Atelier', 'nyassobi-wp-plugin'),
+                    'add_new_item' => __('Ajouter un atelier', 'nyassobi-wp-plugin'),
+                    'edit_item' => __('Modifier l\'atelier', 'nyassobi-wp-plugin'),
+                    'view_item' => __('Voir l\'atelier', 'nyassobi-wp-plugin'),
+                    'search_items' => __('Rechercher un atelier', 'nyassobi-wp-plugin'),
+                ],
+                'public' => true,
+                'has_archive' => true,
+                'rewrite' => ['slug' => 'ateliers'],
+                'supports' => ['title', 'editor', 'excerpt', 'thumbnail', 'revisions'],
+                'show_in_rest' => true,
+                'show_in_graphql' => true,
+                'graphql_single_name' => 'Atelier',
+                'graphql_plural_name' => 'Ateliers',
+                'menu_icon' => 'dashicons-welcome-learn-more',
+                'menu_position' => 22,
+            ]
+        );
+
+        register_taxonomy(
+            self::ATELIER_TAXONOMY,
+            self::ATELIER_POST_TYPE,
+            [
+                'label' => __('Types d\'ateliers', 'nyassobi-wp-plugin'),
+                'labels' => [
+                    'name' => __('Types d\'ateliers', 'nyassobi-wp-plugin'),
+                    'singular_name' => __('Type d\'atelier', 'nyassobi-wp-plugin'),
+                ],
+                'public' => true,
+                'hierarchical' => false,
+                'rewrite' => ['slug' => 'type-ateliers'],
+                'show_in_rest' => true,
+                'show_in_graphql' => true,
+                'graphql_single_name' => 'AtelierType',
+                'graphql_plural_name' => 'AtelierTypes',
+            ]
+        );
+
+        $this->ensure_default_atelier_terms();
+
+        register_post_meta(
+            self::ATELIER_POST_TYPE,
+            self::ATELIER_ATTACHMENT_META,
+            [
+                'type' => 'string',
+                'single' => true,
+                'sanitize_callback' => 'esc_url_raw',
+                'show_in_rest' => true,
+                'auth_callback' => static function (): bool {
+                    return current_user_can('edit_posts');
+                },
+            ]
+        );
+
+        register_post_meta(
+            self::ATELIER_POST_TYPE,
+            self::ATELIER_VIDEO_META,
+            [
+                'type' => 'string',
+                'single' => true,
+                'sanitize_callback' => 'esc_url_raw',
+                'show_in_rest' => true,
+                'auth_callback' => static function (): bool {
+                    return current_user_can('edit_posts');
+                },
+            ]
+        );
+    }
+
+    /**
      * Outputs the settings page markup.
      */
     public function render_settings_page(): void
@@ -134,7 +288,14 @@ final class Nyassobi_WP_Plugin
         $value = $options[$args['key']] ?? '';
         $description = $args['description'] ?? '';
 
-        if ('email' === $args['type']) {
+        if ('textarea' === $args['type']) {
+            printf(
+                '<textarea name="%1$s[%2$s]" id="%2$s" rows="5" class="large-text code">%3$s</textarea>',
+                esc_attr(self::OPTION_NAME),
+                esc_attr($args['key']),
+                esc_textarea($value)
+            );
+        } elseif ('email' === $args['type']) {
             printf(
                 '<input type="email" name="%1$s[%2$s]" id="%2$s" value="%3$s" class="regular-text" />',
                 esc_attr(self::OPTION_NAME),
@@ -175,6 +336,8 @@ final class Nyassobi_WP_Plugin
 
             if ('email' === $field['type']) {
                 $sanitized[$key] = sanitize_email($raw_value);
+            } elseif ('textarea' === $field['type']) {
+                $sanitized[$key] = sanitize_textarea_field($raw_value);
             } else {
                 $sanitized[$key] = esc_url_raw($raw_value);
             }
@@ -207,6 +370,10 @@ final class Nyassobi_WP_Plugin
                         'type' => 'String',
                         'description' => __('Adresse email de contact.', 'nyassobi-wp-plugin'),
                     ],
+                    'introTextNyassobi' => [
+                        'type' => 'String',
+                        'description' => __('Texte d\'introduction de Nyassobi.', 'nyassobi-wp-plugin'),
+                    ],
                     'signupFormUrl' => [
                         'type' => 'String',
                         'description' => __('URL du formulaire d\'inscription.', 'nyassobi-wp-plugin'),
@@ -235,6 +402,50 @@ final class Nyassobi_WP_Plugin
                 'description' => __('Paramètres disponibles pour le front-end Nyassobi.', 'nyassobi-wp-plugin'),
                 'resolve' => static function (): array {
                     return Nyassobi_WP_Plugin::format_settings_for_graphql();
+                },
+            ]
+        );
+
+        register_graphql_field(
+            'Atelier',
+            'attachmentUrl',
+            [
+                'type' => 'String',
+                'description' => __('Pièce jointe (PDF/PPT) liée à l\'atelier.', 'nyassobi-wp-plugin'),
+                'resolve' => function ($post): ?string {
+                    $wp_post = $this->resolve_post_from_graphql_value($post);
+                    if (! $wp_post) {
+                        return null;
+                    }
+
+                    if ($this->is_paid_atelier($wp_post) && ! is_user_logged_in()) {
+                        return null;
+                    }
+
+                    $url = get_post_meta($wp_post->ID, self::ATELIER_ATTACHMENT_META, true);
+                    return $url ? (string) $url : null;
+                },
+            ]
+        );
+
+        register_graphql_field(
+            'Atelier',
+            'videoUrl',
+            [
+                'type' => 'String',
+                'description' => __('Lien vidéo (fichier ou YouTube) pour l\'atelier.', 'nyassobi-wp-plugin'),
+                'resolve' => function ($post): ?string {
+                    $wp_post = $this->resolve_post_from_graphql_value($post);
+                    if (! $wp_post) {
+                        return null;
+                    }
+
+                    if ($this->is_paid_atelier($wp_post) && ! is_user_logged_in()) {
+                        return null;
+                    }
+
+                    $url = get_post_meta($wp_post->ID, self::ATELIER_VIDEO_META, true);
+                    return $url ? (string) $url : null;
                 },
             ]
         );
@@ -355,15 +566,7 @@ final class Nyassobi_WP_Plugin
         }
 
         $settings = self::get_settings();
-        $recipient = isset($settings['contact_email']) ? sanitize_email((string) $settings['contact_email']) : '';
-
-        if (! is_email($recipient)) {
-            $recipient = sanitize_email((string) get_option('admin_email'));
-        }
-
-        if (! is_email($recipient)) {
-            throw new $user_error_class(__('No valid recipient email is configured.', 'nyassobi-wp-plugin'));
-        }
+        $recipient = isset($settings['contact_email']) ? sanitize_email((string) $settings['contact_email']) : sanitize_email((string) get_option('admin_email'));
 
         $mail_subject = sprintf('[Nyassobi] %s', $subject);
         $body_lines = [
@@ -392,7 +595,7 @@ final class Nyassobi_WP_Plugin
         $recipient = apply_filters('nyassobi_wp_plugin_contact_recipient', $recipient, $sanitized, $input);
 
         if (! is_email($recipient)) {
-            throw new $user_error_class(__('No valid recipient email is configured.', 'nyassobi-wp-plugin'));
+            throw new $user_error_class(__('No valid contact email is configured in Nyassobi settings.', 'nyassobi-wp-plugin'));
         }
 
         $sent = wp_mail($recipient, $mail_subject, $body, $headers);
@@ -408,6 +611,177 @@ final class Nyassobi_WP_Plugin
             'success' => true,
             'message' => __('Thank you! Your message has been sent.', 'nyassobi-wp-plugin'),
         ];
+    }
+
+    /**
+     * Registers atelier meta boxes for media and video links.
+     */
+    public function register_atelier_metaboxes(): void
+    {
+        add_meta_box(
+            'nyassobi_atelier_assets',
+            __('Ressources de l\'atelier', 'nyassobi-wp-plugin'),
+            [$this, 'render_atelier_assets_metabox'],
+            self::ATELIER_POST_TYPE,
+            'normal',
+            'default'
+        );
+    }
+
+    /**
+     * Renders the atelier assets metabox.
+     */
+    public function render_atelier_assets_metabox(\WP_Post $post): void
+    {
+        wp_nonce_field('nyassobi_atelier_assets_nonce', 'nyassobi_atelier_assets_nonce');
+
+        $attachment = get_post_meta($post->ID, self::ATELIER_ATTACHMENT_META, true);
+        $video = get_post_meta($post->ID, self::ATELIER_VIDEO_META, true);
+        ?>
+        <p>
+            <label for="<?php echo esc_attr(self::ATELIER_ATTACHMENT_META); ?>">
+                <?php esc_html_e('Pièce jointe (PDF/PPT)', 'nyassobi-wp-plugin'); ?>
+            </label><br />
+            <input type="url" class="widefat" id="<?php echo esc_attr(self::ATELIER_ATTACHMENT_META); ?>"
+                   name="<?php echo esc_attr(self::ATELIER_ATTACHMENT_META); ?>"
+                   value="<?php echo esc_attr((string) $attachment); ?>"
+                   placeholder="<?php esc_attr_e('URL de la ressource', 'nyassobi-wp-plugin'); ?>" />
+            <button type="button"
+                    class="button nyassobi-media-button"
+                    data-target="#<?php echo esc_attr(self::ATELIER_ATTACHMENT_META); ?>"
+                    data-title="<?php echo esc_attr__('Choisir une pièce jointe', 'nyassobi-wp-plugin'); ?>"
+                    data-button="<?php echo esc_attr__('Utiliser ce fichier', 'nyassobi-wp-plugin'); ?>">
+                <?php esc_html_e('Téléverser / choisir un fichier', 'nyassobi-wp-plugin'); ?>
+            </button>
+            <em><?php esc_html_e('Uploadez votre fichier dans la médiathèque puis copiez son URL.', 'nyassobi-wp-plugin'); ?></em>
+        </p>
+        <p>
+            <label for="<?php echo esc_attr(self::ATELIER_VIDEO_META); ?>">
+                <?php esc_html_e('Vidéo (fichier ou lien YouTube)', 'nyassobi-wp-plugin'); ?>
+            </label><br />
+            <input type="url" class="widefat" id="<?php echo esc_attr(self::ATELIER_VIDEO_META); ?>"
+                   name="<?php echo esc_attr(self::ATELIER_VIDEO_META); ?>"
+                   value="<?php echo esc_attr((string) $video); ?>"
+                   placeholder="<?php esc_attr_e('URL de la vidéo (MP4 ou YouTube)', 'nyassobi-wp-plugin'); ?>" />
+            <button type="button"
+                    class="button nyassobi-media-button"
+                    data-target="#<?php echo esc_attr(self::ATELIER_VIDEO_META); ?>"
+                    data-title="<?php echo esc_attr__('Choisir une vidéo', 'nyassobi-wp-plugin'); ?>"
+                    data-button="<?php echo esc_attr__('Utiliser cette vidéo', 'nyassobi-wp-plugin'); ?>">
+                <?php esc_html_e('Téléverser / choisir une vidéo', 'nyassobi-wp-plugin'); ?>
+            </button>
+            <em><?php esc_html_e('Collez le lien YouTube ou l’URL d’un fichier vidéo hébergé.', 'nyassobi-wp-plugin'); ?></em>
+        </p>
+        <?php
+    }
+
+    /**
+     * Saves atelier meta fields.
+     */
+    public function save_atelier_meta(int $post_id): void
+    {
+        if (! isset($_POST['nyassobi_atelier_assets_nonce'])) {
+            return;
+        }
+
+        if (! wp_verify_nonce((string) $_POST['nyassobi_atelier_assets_nonce'], 'nyassobi_atelier_assets_nonce')) {
+            return;
+        }
+
+        if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) {
+            return;
+        }
+
+        $post_type = get_post_type($post_id);
+        if (self::ATELIER_POST_TYPE !== $post_type) {
+            return;
+        }
+
+        if (! current_user_can('edit_post', $post_id)) {
+            return;
+        }
+
+        $attachment = isset($_POST[self::ATELIER_ATTACHMENT_META]) ? esc_url_raw((string) $_POST[self::ATELIER_ATTACHMENT_META]) : '';
+        $video = isset($_POST[self::ATELIER_VIDEO_META]) ? esc_url_raw((string) $_POST[self::ATELIER_VIDEO_META]) : '';
+
+        update_post_meta($post_id, self::ATELIER_ATTACHMENT_META, $attachment);
+        update_post_meta($post_id, self::ATELIER_VIDEO_META, $video);
+    }
+
+    /**
+     * Returns excerpt/CTA for paid ateliers when the visitor is not logged in.
+     */
+    public function maybe_gate_atelier_content(string $content): string
+    {
+        if (is_admin()) {
+            return $content;
+        }
+
+        $post = get_post();
+
+        if (! ($post instanceof \WP_Post) || self::ATELIER_POST_TYPE !== $post->post_type) {
+            return $content;
+        }
+
+        if (! has_term('payant', self::ATELIER_TAXONOMY, $post)) {
+            return $content;
+        }
+
+        if (is_user_logged_in()) {
+            return $content;
+        }
+
+        $preview = has_excerpt($post)
+            ? wpautop(wp_kses_post($post->post_excerpt))
+            : wpautop(esc_html(wp_trim_words(wp_strip_all_tags($content), 55, '…')));
+
+        $cta = sprintf(
+            '<p><strong>%s</strong></p>',
+            esc_html__('Adhérez à Nyassobi pour découvrir tous le contenu exclusif concernant les ateliers.', 'nyassobi-wp-plugin')
+        );
+
+        return $preview . $cta;
+    }
+
+    /**
+     * Helper: is the atelier marked as paid?
+     */
+    private function is_paid_atelier(\WP_Post $post): bool
+    {
+        return has_term('payant', self::ATELIER_TAXONOMY, $post);
+    }
+
+    /**
+     * Normalizes GraphQL resolver value to a WP_Post instance.
+     *
+     * @param mixed $post Resolver value (can be WP_Post, array, or WPGraphQL model).
+     */
+    private function resolve_post_from_graphql_value($post): ?\WP_Post
+    {
+        if ($post instanceof \WP_Post) {
+            return $post;
+        }
+
+        $maybe_id = null;
+
+        if (is_object($post) && isset($post->ID)) {
+            $maybe_id = (int) $post->ID;
+        } elseif (is_object($post) && isset($post->databaseId)) {
+            $maybe_id = (int) $post->databaseId;
+        } elseif (is_array($post) && isset($post['ID'])) {
+            $maybe_id = (int) $post['ID'];
+        } elseif (is_array($post) && isset($post['databaseId'])) {
+            $maybe_id = (int) $post['databaseId'];
+        }
+
+        if ($maybe_id) {
+            $wp_post = get_post($maybe_id);
+            if ($wp_post instanceof \WP_Post) {
+                return $wp_post;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -442,6 +816,7 @@ final class Nyassobi_WP_Plugin
 
         return [
             'contactEmail' => $options['contact_email'] ?? null,
+            'introTextNyassobi' => $options['intro_text_nyassobi'] ?? null,
             'signupFormUrl' => $options['signup_form_url'] ?? null,
             'parentalAgreementUrl' => $options['parental_agreement_url'] ?? null,
             'associationStatusUrl' => $options['association_status_url'] ?? null,
@@ -461,6 +836,11 @@ final class Nyassobi_WP_Plugin
                 'label' => __('Adresse email de contact', 'nyassobi-wp-plugin'),
                 'description' => __('Email principal pour les demandes entrantes.', 'nyassobi-wp-plugin'),
                 'type' => 'email',
+            ],
+            'intro_text_nyassobi' => [
+                'label' => __('Texte d\'introduction', 'nyassobi-wp-plugin'),
+                'description' => __('Texte long de présentation affiché sur le front Nyassobi.', 'nyassobi-wp-plugin'),
+                'type' => 'textarea',
             ],
             'signup_form_url' => [
                 'label' => __('URL du formulaire d\'inscription', 'nyassobi-wp-plugin'),
